@@ -1,0 +1,39 @@
+/* App CSS Enhancements */
+
+.ant-layout {
+  min-height: 100vh;
+}
+
+/* Card subtle transitions */
+.ant-card {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+/* Ant Table Custom styling */
+.ant-table-thead > tr > th {
+  font-weight: 700 !important;
+  font-size: 13px !important;
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
+}
+
+.ant-table-tbody > tr > td {
+  font-size: 14px;
+}
+
+/* Ant Design Modal Customizations */
+.ant-modal-content {
+  border-radius: 16px !important;
+  padding: 24px !important;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25) !important;
+}
+
+.ant-modal-header {
+  margin-bottom: 16px !important;
+}
+
+/* Form Item Label Customizations */
+.ant-form-item-label > label {
+  font-size: 13px !important;
+  font-weight: 600 !important;
+}
