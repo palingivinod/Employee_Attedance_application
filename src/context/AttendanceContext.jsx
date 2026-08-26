@@ -1,6 +1,15 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import dayjs from 'dayjs';
 import { INITIAL_USERS, DEFAULT_ADMIN } from '../data/initialData';
+import {
+  fetchCloudUsers,
+  saveCloudUser,
+  fetchCloudAttendance,
+  saveCloudAttendanceRecord,
+  subscribeToCloudUsers,
+  subscribeToCloudAttendance,
+  getCloudStatus
+} from '../utils/dbService';
 
 const AttendanceContext = createContext(null);
 
@@ -12,7 +21,7 @@ const STORAGE_KEYS = {
 };
 
 export const AttendanceProvider = ({ children }) => {
- // for theme
+  // Theme state
   const [isDarkMode, setIsDarkMode] = useState(() => {
     try {
       return localStorage.getItem(STORAGE_KEYS.THEME) === 'dark';
@@ -33,7 +42,13 @@ export const AttendanceProvider = ({ children }) => {
     });
   };
 
-  // 1. Users State - purely backed by localStorage
+  // Cloud connection status
+  const [isCloudConnected, setIsCloudConnected] = useState(false);
+  const [cloudSyncing, setCloudSyncing] = useState(true);
+  const [cloudEngine, setCloudEngine] = useState(null); // 'realtime' | 'firestore' | null
+  const [cloudError, setCloudError] = useState(null);
+
+  // 1. Users State - Initialized from LocalStorage immediately for instant load
   const [users, setUsers] = useState(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.USERS);
@@ -63,7 +78,7 @@ export const AttendanceProvider = ({ children }) => {
     return null;
   });
 
-  // 3. Attendance Records - purely backed by localStorage
+  // 3. Attendance Records - Initialized from LocalStorage immediately
   const [attendanceRecords, setAttendanceRecords] = useState(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.ATTENDANCE);
@@ -83,7 +98,7 @@ export const AttendanceProvider = ({ children }) => {
   // Notification state for login transition
   const [lastLoginMessage, setLastLoginMessage] = useState(null);
 
-  // Sync users to LocalStorage whenever state updates
+  // Sync users to LocalStorage
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
@@ -114,6 +129,87 @@ export const AttendanceProvider = ({ children }) => {
     }
   }, [attendanceRecords]);
 
+  // Cloud Database Handshake & Real-time Synchronization
+  useEffect(() => {
+    let isMounted = true;
+    let unsubscribeUsers = () => {};
+    let unsubscribeAttendance = () => {};
+
+    const initializeCloudSync = async () => {
+      try {
+        setCloudSyncing(true);
+
+        // Fetch users from Cloud (Realtime DB / Firestore)
+        const cloudUsers = await fetchCloudUsers();
+        const status = getCloudStatus();
+
+        if (isMounted) {
+          setCloudEngine(status.engine);
+          setCloudError(null);
+        }
+
+        if (isMounted && Array.isArray(cloudUsers) && cloudUsers.length > 0) {
+          setUsers(cloudUsers);
+          localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(cloudUsers));
+        }
+
+        // Fetch attendance logs from Cloud
+        const cloudRecords = await fetchCloudAttendance();
+        if (isMounted && Array.isArray(cloudRecords)) {
+          setAttendanceRecords(cloudRecords);
+          localStorage.setItem(STORAGE_KEYS.ATTENDANCE, JSON.stringify(cloudRecords));
+        }
+
+        if (isMounted) {
+          setIsCloudConnected(true);
+          setCloudSyncing(false);
+        }
+
+        // Subscribe to real-time Cloud updates
+        unsubscribeUsers = subscribeToCloudUsers(
+          (updatedUsers) => {
+            if (isMounted && Array.isArray(updatedUsers) && updatedUsers.length > 0) {
+              setUsers(updatedUsers);
+              localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(updatedUsers));
+            }
+          },
+          (err) => {
+            console.warn('Real-time users sync error:', err);
+          }
+        );
+
+        unsubscribeAttendance = subscribeToCloudAttendance(
+          (updatedRecords) => {
+            if (isMounted && Array.isArray(updatedRecords)) {
+              setAttendanceRecords(updatedRecords);
+              localStorage.setItem(STORAGE_KEYS.ATTENDANCE, JSON.stringify(updatedRecords));
+            }
+          },
+          (err) => {
+            console.warn('Real-time attendance sync error:', err);
+          }
+        );
+      } catch (err) {
+        console.warn('Cloud database running in LocalStorage mode:', err);
+        const status = getCloudStatus();
+        if (isMounted) {
+          setIsCloudConnected(false);
+          setCloudEngine(null);
+          setCloudError(err.message || status.error || 'Permission Denied / Offline');
+          setCloudSyncing(false);
+        }
+      }
+    };
+
+    initializeCloudSync();
+
+    return () => {
+      isMounted = false;
+      unsubscribeUsers();
+      unsubscribeAttendance();
+    };
+  }, []);
+
   // Helper: Date & Time Formats
   const getTodayString = () => dayjs().format('YYYY-MM-DD');
   const getCurrentTimeString = () => dayjs().format('hh:mm:ss A');
@@ -136,7 +232,7 @@ export const AttendanceProvider = ({ children }) => {
   /**
    * Login Handler
    * - Authenticates credentials from stored users
-   * - If Employee: Automatically captures current timestamp as "In-Time" for today and saves in localStorage
+   * - If Employee: Automatically captures current timestamp as "In-Time" for today and saves in Cloud + localStorage
    */
   const login = (emailOrUsername, password) => {
     const cleanInput = emailOrUsername.trim().toLowerCase();
@@ -153,7 +249,8 @@ export const AttendanceProvider = ({ children }) => {
     if (user.role === 'employee') {
       const today = getTodayString();
       const currentTime = getCurrentTimeString();
-      
+      let recordToSave = null;
+
       setAttendanceRecords((prev) => {
         const existingIndex = prev.findIndex(
           (rec) => rec.userId === user.id && rec.date === today
@@ -170,6 +267,7 @@ export const AttendanceProvider = ({ children }) => {
               status: 'Present'
             };
           }
+          recordToSave = updated[existingIndex];
         } else {
           recordedInTime = currentTime;
           const newRecord = {
@@ -181,6 +279,7 @@ export const AttendanceProvider = ({ children }) => {
             status: 'Present'
           };
           updated = [newRecord, ...prev];
+          recordToSave = newRecord;
         }
 
         try {
@@ -191,6 +290,15 @@ export const AttendanceProvider = ({ children }) => {
 
         return updated;
       });
+
+      // Write to Cloud Database (Realtime DB or Firestore)
+      if (recordToSave) {
+        saveCloudAttendanceRecord(recordToSave)
+          .then(() => setIsCloudConnected(true))
+          .catch((err) => {
+            console.warn('Cloud sync write notice (saved locally in LocalStorage):', err);
+          });
+      }
     }
 
     setCurrentUser(user);
@@ -216,7 +324,7 @@ export const AttendanceProvider = ({ children }) => {
 
   /**
    * Logout Handler
-   * - If Employee: Captures current timestamp as "Out-Time", updates localStorage record, and logs out
+   * - If Employee: Captures current timestamp as "Out-Time", updates Cloud + localStorage record, and logs out
    */
   const logout = () => {
     let recordedOutTime = null;
@@ -225,6 +333,7 @@ export const AttendanceProvider = ({ children }) => {
       const today = getTodayString();
       const currentTime = getCurrentTimeString();
       recordedOutTime = currentTime;
+      let recordToSave = null;
 
       setAttendanceRecords((prev) => {
         const existingIndex = prev.findIndex(
@@ -239,6 +348,7 @@ export const AttendanceProvider = ({ children }) => {
             outTime: currentTime,
             status: 'Completed'
           };
+          recordToSave = updated[existingIndex];
         } else {
           const newRecord = {
             id: `att-${currentUser.id}-${today}`,
@@ -249,6 +359,7 @@ export const AttendanceProvider = ({ children }) => {
             status: 'Completed'
           };
           updated = [newRecord, ...prev];
+          recordToSave = newRecord;
         }
 
         try {
@@ -259,6 +370,15 @@ export const AttendanceProvider = ({ children }) => {
 
         return updated;
       });
+
+      // Write to Cloud Database
+      if (recordToSave) {
+        saveCloudAttendanceRecord(recordToSave)
+          .then(() => setIsCloudConnected(true))
+          .catch((err) => {
+            console.warn('Cloud sync write notice (saved locally in LocalStorage):', err);
+          });
+      }
     }
 
     setCurrentUser(null);
@@ -277,7 +397,7 @@ export const AttendanceProvider = ({ children }) => {
 
   /**
    * Register User / Admin Handler
-   * - Appends new user to state and persists to localStorage
+   * - Appends new user to state and persists to Cloud + localStorage
    */
   const registerUser = (userData) => {
     const idClean = userData.id.trim().toUpperCase();
@@ -315,6 +435,13 @@ export const AttendanceProvider = ({ children }) => {
       console.error(e);
     }
 
+    // Async write to Cloud Database
+    saveCloudUser(newUser)
+      .then(() => setIsCloudConnected(true))
+      .catch((err) => {
+        console.warn('Cloud sync write notice (saved locally in LocalStorage):', err);
+      });
+
     return { success: true, user: newUser };
   };
 
@@ -333,7 +460,11 @@ export const AttendanceProvider = ({ children }) => {
         getTodayAttendanceForUser,
         getAttendedDaysCount,
         isDarkMode,
-        toggleTheme
+        toggleTheme,
+        isCloudConnected,
+        cloudSyncing,
+        cloudEngine,
+        cloudError
       }}
     >
       {children}
